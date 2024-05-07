@@ -1,0 +1,874 @@
+def templatePath = "Capf_Ui/cicd/template-dev.json"
+
+//QUAY IMAGE REGISTRY
+def quayRegistryHostname = "prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in"
+def quayRegistryOrgNameDev = "capf-dev/capf-ui"
+def quayRegistryOrgNameQA = "capf-qa/capf-ui"
+def quayRegistryOrgNamePreProd = "capf-preprod/capf-ui"
+def quayRegistryOrgNameProd = "capf-prod/capf-ui"
+
+//CLUSTER AND SONARQUBE URLS
+def clusterApiUrl= "https://api.ocpmgmtcl01.goindigo.in:6443"
+def ocpRegistryUrl ="image-registry.openshift-image-registry.svc:5000"
+def ocpSonarqubeUrl = "https://sonarqube-sonarqube.apps.ocpmgmtcl01.goindigo.in/"
+def name="capf-ui"
+
+//Email ID's Detail
+def mailToRecipients = "kirana.x.s@goindigo.in"
+def mailToRecipientsqa = 'kirana.x.s@goindigo.in'
+def mailToRecipientsuat = 'kirana.x.s@goindigo.in'
+def mailToRecipientspreprod = 'kirana.x.s@goindigo.in'
+def mailToRecipientsprod = 'kirana.x.s@goindigo.in'
+def useremail='kirana.x.s@goindigo.in'
+
+
+pipeline {
+
+
+    agent { label 'nodejs-common' }
+
+    environment {
+
+        PROJECT_DEV = "capf-dev"
+        PROJECT_QA = "capf-qa"
+        PROJECT_UAT = "capf-uat"
+        PROJECT_PREPROD = "capf-preprod"
+        PROJECT_PROD = "capf-prod"
+        NAME = "capf-ui"
+        ENV_DEV = "dev"
+        QUAY_REPO_NAME_DEV="capf-dev/capf-ui"
+        QUAY_REPO_NAME_QA="capf-qa/capf-ui"
+        QUAY_REPO_NAME_UAT="capf-uat/capf-ui"
+        QUAY_REPO_NAME_PREPROD="capf-preprod/capf-ui"
+        QUAY_REPO_NAME_PROD="capf-prod/capf-ui"
+        QUAY_URL="https://prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in"
+    }
+
+    stages {
+
+        stage('Checkout') {
+
+            steps {
+                checkout scm                
+            }
+        } //End of Stage Checkout
+    
+        stage('Code Quality Check via SonarQube') {
+          steps {
+             script {
+               def scannerHome = tool 'sonarqube_server_mgmt';
+                 withSonarQubeEnv("sonarqube_server_mgmt") {
+                 sh "${tool("sonarqube_server_mgmt")}/bin/sonar-scanner \
+                 -Dsonar.projectKey=capf-ui \
+                 -Dsonar.sources=. \
+                 -Dsonar.css.node=. \
+                 -Dsonar.host.url=https://sonarqube-sonarqube.apps.ocpmgmtcl01.goindigo.in \
+                 -Dsonar.login=d8c547afb7ce1d4cb2278a4c61da5f19bfdce786"
+               }
+           }
+        }
+        post{
+                always{
+                    echo '${NAME} Code Analysis stage' 
+                }
+                success {
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} Sonarqube (Code Analysis)",
+                    body: " Sonarqube (Code Analysis) is Successful for ${NAME} with build number ${env.BUILD_NUMBER} <br> Sonarqube login URL ${ocpSonarqubeUrl} <br> Please check the report after login into sonarqube server URL by using Azure Active Directory Credentials"
+                }
+                failure {  
+                    mail bcc: '', body: "<b>${NAME} sonarqube Analysis failed Sonarqube login URL ${ocpSonarqubeUrl} </b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: 'Priyanka.x.Koneru@goindigo.in', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+                unstable {  
+                    echo '${NAME} Code Analysis stage is marked as unstable'  
+                }  
+                changed {  
+                    echo '${NAME} Code Analysis state of Pipeline has changed'  
+                    echo '${NAME} Code Analysis previously failing but is now successful'  
+                }
+           }
+        } //Code Quality Check via SonarQube
+
+        stage ('Deploy Template') {
+
+                      steps{
+                             script{
+                                        try {
+                                    openshift.withCluster() {
+                                        openshift.withProject(env.PROJECT_DEV) {
+                                                echo "Using project: ${openshift.project()}"
+
+                                                def templateSelector = openshift.selector( "template", "${NAME}")
+
+                                                if(openshift.selector("bc", [ template : "${NAME}"]).exists()){
+                                                openshift.selector("bc", "${NAME}").delete();
+                                                }
+                                                if(openshift.selector("is", [ template : "${NAME}"]).exists()){
+                                                openshift.selector("is", "${NAME}").delete();
+                                                }
+
+                                                openshift.newApp(templatePath, "-p PROJECT_DEV=${env.PROJECT_DEV} -p NAME=${env.NAME} -p ENV_DEV=${env.ENV_DEV}")
+
+                                                }
+                                                }
+                                                }
+
+                                         catch ( e ) {
+                                                echo e.getMessage()
+                                                error "Deploy Template not successful."
+                                             }
+                                 }
+                     }
+        } // End of Stage Deploy Template
+          
+        stage('Image build') {
+
+                                steps{
+                                          script{
+                                            try {
+                                            timeout(time: 60, unit: 'MINUTES') {
+                                                                openshift.withCluster() {
+                                                                openshift.withProject(env.PROJECT_DEV) {
+                                                                def build = openshift.selector("bc", "capf-ui").startBuild("--from-file=/home/jenkins/agent/workspace/capf-ui/Capf_Ui", "--wait=true")
+                                                                build.untilEach {
+                                                                        echo "Using project in Image Build ${build}"
+                                                                        return it.object().status.phase == "Complete"
+                                                                }
+                                                     }
+                                                 }
+                                             }
+                                             echo "STAGE Image Build Template Finished"
+                                     }
+                                           catch ( e ) {
+                                                echo e.getMessage()
+                                                error "Build not successful."
+                                       }
+                                     }
+                                }
+                                post{
+                                    always{
+                                        echo 'Dev environment Build is completed'  
+                                    }
+                                    success {  
+                                        emailext to: "${mailToRecipients}",
+                                        subject: "${NAME} Build status,",
+                                        body: "Build is Successful. kindly refer the build log at ${env.BUILD_LOG}  for any further reference"
+                                    }  
+                                    failure {  
+                                        mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                                    }  
+                                    unstable {  
+                                        echo 'Dev environment Build is marked as unstable'  
+                                    }  
+                                    changed {  
+                                        echo 'Dev environment Build stage status changed'  
+                                        echo 'Dev environment Build previously failing but is now successful'  
+                                    }
+
+                                }
+                               } // End of Stage Image build
+
+           stage('Push Image to QUAY') {
+                 steps {
+                    script {
+                         withCredentials([usernamePassword(credentialsId: 'quayPass', passwordVariable: 'QUAY_REGISTRY_USER_PASS', usernameVariable: 'QUAY_REGISTRY_USER_NAME'),
+                         usernamePassword(credentialsId: 'ocpClusterCreds', passwordVariable: 'CLUSTER_USER_PASS', usernameVariable: 'CLUSTER_USER_NAME')]) 
+                         {
+                           sh "oc login -u  ${CLUSTER_USER_NAME} -p \"${CLUSTER_USER_PASS}\" --insecure-skip-tls-verify=true ${clusterApiUrl} "
+                           def temptoken = sh(script: 'echo -n ${CLUSTER_USER_NAME}:`oc whoami -t`  | base64 ', returnStdout: true).trim()
+                           echo "temptoken is '${temptoken}'"
+                           registryEncodedToken  = temptoken.replaceAll("\n", "")
+
+                           def quaytoken = sh(script: 'echo -n ${QUAY_REGISTRY_USER_NAME}:${QUAY_REGISTRY_USER_PASS}  | base64 ', returnStdout: true).trim()
+                           
+                           sh """  
+                           echo "registryEncodedToken is '${registryEncodedToken}'"
+                           echo "quaytoken is '${quaytoken}'"
+                           cp /home/jenkins/docker/config.json /tmp/config.json
+                           cat  /tmp/config.json
+                           sed -i "s/SourceRegistryPass/$quaytoken/g" /tmp/config.json
+                           sed -i "s/SourceRegistry/$quayRegistryHostname/g"  /tmp/config.json
+                           sed -i "s/DestRegistryPass/$registryEncodedToken/g"  /tmp/config.json
+                           sed -i "s/DestRegistry/$ocpRegistryUrl/g"  /tmp/config.json
+                           
+                           cat  /tmp/config.json
+                          
+                           oc image mirror -a  /tmp/config.json  --insecure=true ${ocpRegistryUrl}/${PROJECT_DEV}/${NAME}:latest  ${quayRegistryHostname}/${quayRegistryOrgNameDev}:${env.BUILD_NUMBER}  
+                           """  
+                    }
+                    }
+           }
+         } // STAGE Push Image to QUAY END 
+
+
+           stage('Vulnerability Scan') {
+               
+            steps {
+                    script {
+                     withCredentials([
+                     usernamePassword(credentialsId: 'quayapptoken', passwordVariable: 'QUAY_REGISTRY_USER_TOKEN', usernameVariable: 'username')]){
+                        openshift.withCluster() {
+                        openshift.withProject(env.DEV_NAMESPACE) {
+                            sh """
+                                echo "Setting the QUAY_REGISTRY_USER_TOKEN " 
+                                export tag=${env.BUILD_NUMBER}
+                                export QUAY_API_TOKEN=${QUAY_REGISTRY_USER_TOKEN}
+                                export IMAGE_ID_OUTPUT_FILE=/tmp/image-id.txt
+                                export VULNERABILITY_OUTPUT_FILE=/tmp/Vulnerability.txt
+                                /vulnerability_scan.sh 2> /dev/null || exit 0
+                                
+                            """      
+                        }
+                        }
+                        }
+                    }
+            }
+        } //END of Vulnerability Scan
+
+        stage('Deployment in DEV environment- nonprod cluster ') {
+                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    rm -rf capf-ui-dev
+                    echo "Cloning github code"
+                    git clone -b dev https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git capf-ui-dev
+                    cd capf-ui-dev/overlays/dev
+                    echo "Updating image tag in the deployment config"
+                    sed -i "s/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-dev\\/capf-ui:[a-zA-Z0-9|.\\/|-]*/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-dev\\/capf-ui:${env.BUILD_NUMBER}/" DC-patch.yaml
+                    echo "Checking the modified tag value in the yaml"
+                    cat DC-patch.yaml
+                    git add -u
+                    git commit -m "updating deployment yaml"
+                    git push https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git
+                    """
+                }
+              }
+            }
+        post{
+                always{
+                    echo 'Dev environment Deployment is completed'
+                }
+                success { 
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} deployment status",
+                    body: "Dev Deployment of capf-ui is Successful" 
+  
+                }  
+                failure {  
+                    mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+
+            }
+         
+        } //Deployment in DEV environment-nonprod cluster
+
+        stage('Email Approval for QA deployment') {
+            steps {  
+                    script {
+                 emailext mimeType: 'text/html',
+                 subject: "[Jenkins]-Approval for QA deployment ${currentBuild.fullDisplayName}",
+                 to: "${mailToRecipientsqa}",
+                 body: '''
+                        Dear Team, <br>
+                            <br>                     
+                            Deployment of capf-ui application in the Dev environment is completed. <br>
+                            Kindly <a href="${BUILD_URL}input">click here to approve</a> for QA deployment. <br> 
+                            <br>
+                            <br>
+                         Thanks & Regards,<br>
+                         OCP-Team <br>
+                         '''
+
+                        def userInput = input id: 'userInput',
+                              message: 'Do you approve?', 
+                              submitterParameter: 'submitter',
+                              submitter: 'jenkins',
+                              parameters: [
+                                [$class: 'TextParameterDefinition', defaultValue: 'Proceed only with Email Approval', name: 'Comment']]
+
+                        echo ("Comment: "+userInput['Comment'])
+                        echo ("submitted by: "+userInput['submitter'])
+                      }
+                    }
+                } //END of Email Approval for QA deployment
+
+        stage('Image Tag for QA environment nonprod') {
+            steps {
+                script {
+                    openshift.withCluster() {
+                    openshift.tag("${PROJECT_DEV}/${NAME}:latest", "${PROJECT_QA}/${NAME}:${env.BUILD_NUMBER}")
+                }
+                echo "STAGE Image Tag  Finished"
+                }
+            }
+        } //END of Image Tag for QA environment nonpro
+
+           stage('Push Image to QUAY QA ENV') {
+                 steps {
+                      retry (count : 3) {
+                    script {
+                         withCredentials([usernamePassword(credentialsId: 'quayPass', passwordVariable: 'QUAY_REGISTRY_USER_PASS', usernameVariable: 'QUAY_REGISTRY_USER_NAME'),
+                         usernamePassword(credentialsId: 'ocpClusterCreds', passwordVariable: 'CLUSTER_USER_PASS', usernameVariable: 'CLUSTER_USER_NAME')]) 
+                         {
+                           sh "oc login -u  ${CLUSTER_USER_NAME} -p \"${CLUSTER_USER_PASS}\" --insecure-skip-tls-verify=true ${clusterApiUrl} "
+                           def temptoken = sh(script: 'echo -n ${CLUSTER_USER_NAME}:`oc whoami -t`  | base64 ', returnStdout: true).trim()
+                           echo "temptoken is '${temptoken}'"
+                           registryEncodedToken  = temptoken.replaceAll("\n", "")
+
+                           def quaytoken = sh(script: 'echo -n ${QUAY_REGISTRY_USER_NAME}:${QUAY_REGISTRY_USER_PASS}  | base64 ', returnStdout: true).trim()
+                           
+                           sh """  
+                           echo "registryEncodedToken is '${registryEncodedToken}'"
+                           echo "quaytoken is '${quaytoken}'"
+                           cp /home/jenkins/docker/config.json /tmp/config.json
+                           cat  /tmp/config.json
+                           sed -i "s/SourceRegistryPass/$quaytoken/g" /tmp/config.json
+                           sed -i "s/SourceRegistry/$quayRegistryHostname/g"  /tmp/config.json
+                           sed -i "s/DestRegistryPass/$registryEncodedToken/g"  /tmp/config.json
+                           sed -i "s/DestRegistry/$ocpRegistryUrl/g"  /tmp/config.json
+                           
+                           cat  /tmp/config.json
+                           
+                           oc image mirror -a  /tmp/config.json  --insecure=true ${ocpRegistryUrl}/${PROJECT_DEV}/${NAME}:latest  ${quayRegistryHostname}/${quayRegistryOrgNameQA}:${env.BUILD_NUMBER}  
+                          
+                           """  
+                    }
+                    }
+                }
+               }
+         } // STAGE Push Image to QUAY END 
+
+
+           stage('Vulnerability Scan QA env') {
+               
+            steps {
+                    script {
+                     withCredentials([
+                     usernamePassword(credentialsId: 'quayapptoken', passwordVariable: 'QUAY_REGISTRY_USER_TOKEN', usernameVariable: 'username')]){
+                        openshift.withCluster() {
+                        openshift.withProject(env.DEV_NAMESPACE) {
+                            sh """
+                                echo "Setting the QUAY_REGISTRY_USER_TOKEN " 
+                                export tag=${env.BUILD_NUMBER}
+                                export QUAY_API_TOKEN=${QUAY_REGISTRY_USER_TOKEN}
+                                export IMAGE_ID_OUTPUT_FILE=/tmp/image-id.txt
+                                export VULNERABILITY_OUTPUT_FILE=/tmp/Vulnerability.txt
+                                sleep 30s
+                                /vulnerability_scan.sh 2> /dev/null || exit 0
+                                
+                            """      
+                        }
+                        }
+                        }
+                    }
+            }
+        } //END of Vulnerability Scan QA env
+
+        stage('Deployment in QA Environment- nonprod cluster In nonprod cluster') {
+                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    rm -rf capf-ui-qa
+                    echo "Cloning github code"
+                    git clone -b dev https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git capf-ui-qa
+                    cd capf-ui-qa/overlays/qa
+                    echo "Updating image tag in the deployment config"
+                    sed -i "s/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-qa\\/capf-ui:[a-zA-Z0-9|.\\/|-]*/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-qa\\/capf-ui:${env.BUILD_NUMBER}/" DC-patch.yaml
+                    echo "Checking the modified tag value in the yaml"
+                    cat DC-patch.yaml
+                    git add -u
+                    git commit -m "updating deployment yaml"
+                    git push https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git
+                    """
+                }
+              }
+            }
+        post{
+                always{
+                    echo 'QA environment Deployment is completed' 
+                }
+                success {  
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} deployment status",
+                    body: "QA Deployment is Successful"
+                }  
+                failure {  
+                    mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+            }
+          
+        } //END of Deployment 
+
+        stage('Email Approval for UAT deployment') {
+            steps {  
+                    script {
+                 emailext mimeType: 'text/html',
+                 subject: "[Jenkins]-Approval for QA deployment ${currentBuild.fullDisplayName}",
+                 to: "${mailToRecipientsuat}",
+                 body: '''
+                        Dear Team, <br>
+                            <br>                     
+                            Deployment of capf-ui application in the QA environment is completed. <br>
+                            Kindly <a href="${BUILD_URL}input">click here to approve</a> for UAT deployment. <br> 
+                            <br>
+                            <br>
+                         Thanks & Regards,<br>
+                         OCP-Team <br>
+                         '''
+
+                        def userInput = input id: 'userInput',
+                              message: 'Do you approve?', 
+                              submitterParameter: 'submitter',
+                              submitter: 'jenkins',
+                              parameters: [
+                                [$class: 'TextParameterDefinition', defaultValue: 'Proceed only with Email Approval', name: 'Comment']]
+
+                        echo ("Comment: "+userInput['Comment'])
+                        echo ("submitted by: "+userInput['submitter'])
+                      }
+                    }
+                } //END of Email Approval for UAT deployment
+
+        stage('Image Tag for UAT environment nonprod') {
+            steps {
+                script {
+                    openshift.withCluster() {
+                    openshift.tag("${PROJECT_DEV}/${NAME}:latest", "${PROJECT_QA}/${NAME}:${env.BUILD_NUMBER}")
+                }
+                echo "STAGE Image Tag  Finished"
+                }
+            }
+        } //END of Image Tag for UAT environment nonpro
+
+           stage('Push Image to QUAY UAT ENV') {
+                 steps {
+                      retry (count : 3) {
+                    script {
+                         withCredentials([usernamePassword(credentialsId: 'quayPass', passwordVariable: 'QUAY_REGISTRY_USER_PASS', usernameVariable: 'QUAY_REGISTRY_USER_NAME'),
+                         usernamePassword(credentialsId: 'ocpClusterCreds', passwordVariable: 'CLUSTER_USER_PASS', usernameVariable: 'CLUSTER_USER_NAME')]) 
+                         {
+                           sh "oc login -u  ${CLUSTER_USER_NAME} -p \"${CLUSTER_USER_PASS}\" --insecure-skip-tls-verify=true ${clusterApiUrl} "
+                           def temptoken = sh(script: 'echo -n ${CLUSTER_USER_NAME}:`oc whoami -t`  | base64 ', returnStdout: true).trim()
+                           echo "temptoken is '${temptoken}'"
+                           registryEncodedToken  = temptoken.replaceAll("\n", "")
+
+                           def quaytoken = sh(script: 'echo -n ${QUAY_REGISTRY_USER_NAME}:${QUAY_REGISTRY_USER_PASS}  | base64 ', returnStdout: true).trim()
+                           
+                           sh """  
+                           echo "registryEncodedToken is '${registryEncodedToken}'"
+                           echo "quaytoken is '${quaytoken}'"
+                           cp /home/jenkins/docker/config.json /tmp/config.json
+                           cat  /tmp/config.json
+                           sed -i "s/SourceRegistryPass/$quaytoken/g" /tmp/config.json
+                           sed -i "s/SourceRegistry/$quayRegistryHostname/g"  /tmp/config.json
+                           sed -i "s/DestRegistryPass/$registryEncodedToken/g"  /tmp/config.json
+                           sed -i "s/DestRegistry/$ocpRegistryUrl/g"  /tmp/config.json
+                           
+                           cat  /tmp/config.json
+                           
+                           oc image mirror -a  /tmp/config.json  --insecure=true ${ocpRegistryUrl}/${PROJECT_DEV}/${NAME}:latest  ${quayRegistryHostname}/${quayRegistryOrgNameQA}:${env.BUILD_NUMBER}  
+                          
+                           """  
+                    }
+                    }
+                }
+               }
+         } // STAGE Push Image to QUAY END 
+
+
+           stage('Vulnerability Scan UAT env') {
+               
+            steps {
+                    script {
+                     withCredentials([
+                     usernamePassword(credentialsId: 'quayapptoken', passwordVariable: 'QUAY_REGISTRY_USER_TOKEN', usernameVariable: 'username')]){
+                        openshift.withCluster() {
+                        openshift.withProject(env.DEV_NAMESPACE) {
+                            sh """
+                                echo "Setting the QUAY_REGISTRY_USER_TOKEN " 
+                                export tag=${env.BUILD_NUMBER}
+                                export QUAY_API_TOKEN=${QUAY_REGISTRY_USER_TOKEN}
+                                export IMAGE_ID_OUTPUT_FILE=/tmp/image-id.txt
+                                export VULNERABILITY_OUTPUT_FILE=/tmp/Vulnerability.txt
+                                sleep 30s
+                                /vulnerability_scan.sh 2> /dev/null || exit 0
+                                
+                            """      
+                        }
+                        }
+                        }
+                    }
+            }
+        } //END of Vulnerability Scan UAT env
+
+        stage('Deployment in UAT Environment- nonprod cluster In nonprod cluster') {
+                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    rm -rf capf-ui-uat
+                    echo "Cloning github code"
+                    git clone -b dev https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git capf-ui-uat
+                    cd capf-ui-uat/overlays/uat
+                    echo "Updating image tag in the deployment config"
+                    sed -i "s/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-uat\\/capf-ui:[a-zA-Z0-9|.\\/|-]*/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-uat\\/capf-ui:${env.BUILD_NUMBER}/" DC-patch.yaml
+                    echo "Checking the modified tag value in the yaml"
+                    cat DC-patch.yaml
+                    git add -u
+                    git commit -m "updating deployment yaml"
+                    git push https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git
+                    """
+                }
+              }
+            }
+        post{
+                always{
+                    echo 'UAT environment Deployment is completed' 
+                }
+                success {  
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} deployment status",
+                    body: "UAT Deployment is Successful"
+                }  
+                failure {  
+                    mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+            }
+          
+        } //END of Deployment 
+
+        stage('Pushing source code to TFS- security branch') {
+                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    echo "Setting email and name for git config"
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    echo "deleting old cloned folder"
+                    rm -rf capf-ui-security
+                    echo "Cloning github code"
+                    git clone -b capf_Ui "https://$USERNAME:$PASSWORD@github.com/security-branch/capf.git" capf-ui-security
+                    cd capf-ui-security
+                    echo "Deleting all source code from exiting git folder"
+                    rm -rf *
+                    sleep 2
+                    echo "Copying source code"
+                    cp -r /home/jenkins/agent/workspace/capf-ui/Capf_Ui .
+                    sleep 2
+                    echo "Adding files for commit "
+                    git add Capf_Ui
+                    git commit -m "Taging new source code to the branch for secuity test"
+                    git push "https://$USERNAME:$PASSWORD@github.com/security-branch/capf.git"
+                    """
+                }
+            }
+          }
+        } //Pushing source code to TFS- security branch
+
+
+        stage('Email Approval for PREPROD deployment') {
+            steps {  
+                    script {
+                 emailext mimeType: 'text/html',
+                 subject: "[Jenkins]-Approval for PREPROD deployment ${currentBuild.fullDisplayName}",
+                 to: "${mailToRecipientspreprod}",
+                 body: '''
+                        Dear Team, <br>
+                            <br>                     
+                            Deployment of capf-ui application in the Dev environment is completed. <br>
+                            Kindly <a href="${BUILD_URL}input">click here to approve</a> for PREPROD deployment. <br> 
+                            <br>
+                            <br>
+                         Thanks & Regards,<br>
+                         OCP-Team <br>
+                         '''
+
+                        def userInput = input id: 'userInput',
+                              message: 'Do you approve?', 
+                              submitterParameter: 'submitter',
+                              submitter: 'jenkins',
+                              parameters: [
+                                [$class: 'TextParameterDefinition', defaultValue: 'Proceed only with Email Approval', name: 'Comment']]
+
+                        echo ("Comment: "+userInput['Comment'])
+                        echo ("submitted by: "+userInput['submitter'])
+                      }
+                    }
+                } //END of Email Approval for PREPROD deployment
+
+
+            stage('Image Tag for PREPROD environment') {
+                steps {
+                    script {
+                        openshift.withCluster() {
+                        openshift.tag("${PROJECT_DEV}/${NAME}:latest", "${PROJECT_PREPROD}/${NAME}:${env.BUILD_NUMBER}")
+                    }
+                    echo "STAGE Image Tag  Finished"
+                }
+              }
+            } //END of Image Tag for PREPROD environment
+
+
+            stage('Push Image to PREPROD QUAY') {
+                 steps {
+                      retry (count : 3) {
+                    script {
+                         withCredentials([usernamePassword(credentialsId: 'quayPass', passwordVariable: 'QUAY_REGISTRY_USER_PASS', usernameVariable: 'QUAY_REGISTRY_USER_NAME'),
+                         usernamePassword(credentialsId: 'ocpClusterCreds', passwordVariable: 'CLUSTER_USER_PASS', usernameVariable: 'CLUSTER_USER_NAME')]) 
+                         {
+                           sh "oc login -u  ${CLUSTER_USER_NAME} -p \"${CLUSTER_USER_PASS}\" --insecure-skip-tls-verify=true ${clusterApiUrl} "
+                           def temptoken = sh(script: 'echo -n ${CLUSTER_USER_NAME}:`oc whoami -t`  | base64 ', returnStdout: true).trim()
+                           echo "temptoken is '${temptoken}'"
+                           registryEncodedToken  = temptoken.replaceAll("\n", "")
+
+                           def quaytoken = sh(script: 'echo -n ${QUAY_REGISTRY_USER_NAME}:${QUAY_REGISTRY_USER_PASS}  | base64 ', returnStdout: true).trim()
+                           
+                           sh """  
+                           echo "registryEncodedToken is '${registryEncodedToken}'"
+                           echo "quaytoken is '${quaytoken}'"
+                           cp /home/jenkins/docker/config.json /tmp/config.json
+                           cat  /tmp/config.json
+                           sed -i "s/SourceRegistryPass/$quaytoken/g" /tmp/config.json
+                           sed -i "s/SourceRegistry/$quayRegistryHostname/g"  /tmp/config.json
+                           sed -i "s/DestRegistryPass/$registryEncodedToken/g"  /tmp/config.json
+                           sed -i "s/DestRegistry/$ocpRegistryUrl/g"  /tmp/config.json
+                           
+                           cat  /tmp/config.json
+                           
+                           oc image mirror -a  /tmp/config.json  --insecure=true ${ocpRegistryUrl}/${PROJECT_DEV}/${NAME}:latest  ${quayRegistryHostname}/${quayRegistryOrgNamePreProd}:${env.BUILD_NUMBER}  
+                          
+                           """  
+                    }
+                    }
+                 }
+               }
+            } // STAGE Push Image to QUAY END 
+
+           stage('Vulnerability Scan PREPROD') {
+               
+            steps {
+                    script {
+                     withCredentials([
+                     usernamePassword(credentialsId: 'quayapptoken', passwordVariable: 'QUAY_REGISTRY_USER_TOKEN', usernameVariable: 'username')]){
+                        openshift.withCluster() {
+                        openshift.withProject(env.DEV_NAMESPACE) {
+                            sh """
+                                echo "Setting the QUAY_REGISTRY_USER_TOKEN " 
+                                export tag=${env.BUILD_NUMBER}
+                                export QUAY_API_TOKEN=${QUAY_REGISTRY_USER_TOKEN}
+                                export IMAGE_ID_OUTPUT_FILE=/tmp/image-id.txt
+                                export VULNERABILITY_OUTPUT_FILE=/tmp/Vulnerability.txt
+                                sleep 30s
+                                /vulnerability_scan.sh 2> /dev/null || exit 0
+                                
+                            """      
+                        }
+                        }
+                        }
+                    }
+            }
+        } //END of Vulnerability Scan PREPROD
+
+        stage('Deployment in PreProd Environment- nonprod cluster ') {
+                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    rm -rf capf-ui-preprod
+                    echo "Cloning github code"
+                    git clone -b dev https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git capf-ui-preprod
+                    cd capf-ui-preprod/overlays/preprod
+                    echo "Updating image tag in the deployment config"
+                    sed -i "s/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-preprod\\/capf-ui:[a-zA-Z0-9|.\\/|-]*/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-preprod\\/capf-ui:${env.BUILD_NUMBER}/" DC-patch.yaml
+                    echo "Checking the modified tag value in the yaml"
+                    cat DC-patch.yaml
+                    git add -u
+                    git commit -m "updating deployment yaml"
+                    git push https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git
+                    """
+                }
+             }
+            }
+        post{
+                always{
+                    echo 'PREPROD environment Deployment is completed'
+                }
+                success {  
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} deployment status",
+                    body: "PREPROD Deployment is Successful" 
+                }  
+                failure {  
+                    mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+
+            }
+
+
+        }
+        stage('Email Approval for PROD deployment') {
+            steps {  
+                    script {
+                 emailext mimeType: 'text/html',
+                 subject: "[Jenkins]-Approval for PROD deployment ${currentBuild.fullDisplayName}",
+                 to: "${mailToRecipientsprod}",
+                 body: '''
+                        Dear Team, <br>
+                            <br>                     
+                            Deployment of capf-ui application in the Dev environment is completed. <br>
+                            Kindly <a href="${BUILD_URL}input">click here to approve</a> for PROD deployment. <br> 
+                            <br>
+                            <br>
+                         Thanks & Regards,<br>
+                         OCP-Team <br>
+                         '''
+
+                        def userInput = input id: 'userInput',
+                              message: 'Do you approve?', 
+                              submitterParameter: 'submitter',
+                              submitter: 'jenkins',
+                              parameters: [
+                                [$class: 'TextParameterDefinition', defaultValue: 'Proceed only with Email Approval', name: 'Comment']]
+
+                        echo ("Comment: "+userInput['Comment'])
+                        echo ("submitted by: "+userInput['submitter'])
+                      }
+                    }
+                } //END of Email Approval for PROD deployment
+
+            stage('Image Tag for Prod environment') {
+                steps {
+                    script {
+                    openshift.withCluster() {
+                    openshift.tag("${PROJECT_DEV}/${NAME}:latest", "${PROJECT_PROD}/${NAME}:${env.BUILD_NUMBER}")
+                    }
+                    echo "STAGE Image Tag  Finished"
+                    }
+                }
+            }
+            stage('Push Image to QUAY PROD environment') {
+                 steps {
+                      retry (count : 3) {
+                    script {
+                         withCredentials([usernamePassword(credentialsId: 'quayPass', passwordVariable: 'QUAY_REGISTRY_USER_PASS', usernameVariable: 'QUAY_REGISTRY_USER_NAME'),
+                         usernamePassword(credentialsId: 'ocpClusterCreds', passwordVariable: 'CLUSTER_USER_PASS', usernameVariable: 'CLUSTER_USER_NAME')]) 
+                         {
+                           sh "oc login -u  ${CLUSTER_USER_NAME} -p \"${CLUSTER_USER_PASS}\" --insecure-skip-tls-verify=true ${clusterApiUrl} "
+                           def temptoken = sh(script: 'echo -n ${CLUSTER_USER_NAME}:`oc whoami -t`  | base64 ', returnStdout: true).trim()
+                           echo "temptoken is '${temptoken}'"
+                           registryEncodedToken  = temptoken.replaceAll("\n", "")
+
+                           def quaytoken = sh(script: 'echo -n ${QUAY_REGISTRY_USER_NAME}:${QUAY_REGISTRY_USER_PASS}  | base64 ', returnStdout: true).trim()
+                           
+                           sh """  
+                           echo "registryEncodedToken is '${registryEncodedToken}'"
+                           echo "quaytoken is '${quaytoken}'"
+                           cp /home/jenkins/docker/config.json /tmp/config.json
+                           cat  /tmp/config.json
+                           sed -i "s/SourceRegistryPass/$quaytoken/g" /tmp/config.json
+                           sed -i "s/SourceRegistry/$quayRegistryHostname/g"  /tmp/config.json
+                           sed -i "s/DestRegistryPass/$registryEncodedToken/g"  /tmp/config.json
+                           sed -i "s/DestRegistry/$ocpRegistryUrl/g"  /tmp/config.json
+                           
+                           cat  /tmp/config.json
+                           
+                           oc image mirror -a  /tmp/config.json  --insecure=true ${ocpRegistryUrl}/${PROJECT_DEV}/${NAME}:latest  ${quayRegistryHostname}/${quayRegistryOrgNameProd}:${env.BUILD_NUMBER}  
+                          
+                           """  
+                    }
+                    }
+                }
+               }
+            } // STAGE Push Image to QUAY END 
+
+
+           stage('Vulnerability Scan PROD env') {               
+            steps {
+                    script {
+                     withCredentials([
+                     usernamePassword(credentialsId: 'quayapptoken', passwordVariable: 'QUAY_REGISTRY_USER_TOKEN', usernameVariable: 'username')]){
+                        openshift.withCluster() {
+                        openshift.withProject(env.DEV_NAMESPACE) {
+                            sh """
+                                echo "Setting the QUAY_REGISTRY_USER_TOKEN " 
+                                export tag=${env.BUILD_NUMBER}
+                                export QUAY_API_TOKEN=${QUAY_REGISTRY_USER_TOKEN}
+                                export IMAGE_ID_OUTPUT_FILE=/tmp/image-id.txt
+                                export VULNERABILITY_OUTPUT_FILE=/tmp/Vulnerability.txt
+                                sleep 30s
+                                /vulnerability_scan.sh 2> /dev/null || exit 0
+                                
+                            """      
+                        }
+                        }
+                        }
+                    }
+              }
+            } //END of Vulnerability Scan PROD env
+
+
+        stage('Deployment in Production Environment- ARO app prod cluster') {                    
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'githubtoken', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh """
+                    set -e
+                    git config --global user.email "biswajit.dey@goindigo.in"
+                    git config --global user.name "$USERNAME"
+                    rm -rf capf-ui-prod
+                    echo "Cloning github code"
+                    git clone -b dev https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git capf-ui-prod
+                    cd capf-ui-prod/overlays/prod
+                    echo "Updating image tag in the deployment config"
+                    sed -i "s/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-prod\\/capf-ui:[a-zA-Z0-9|.\\/|-]*/image: prod-iga-quay-image-registry.apps.ocpmgmtcl01.goindigo.in\\/capf-prod\\/capf-ui:${env.BUILD_NUMBER}/" DC-patch.yaml
+                    echo "Checking the modified tag value in the yaml"
+                    cat DC-patch.yaml
+                    git add -u
+                    git commit -m "updating deployment yaml"
+                    git push https://$USERNAME:$PASSWORD@github.com/dev-Indigo/capf-ui.git
+                    """
+                }
+            }
+        }
+        post{
+                always{
+                    echo 'PROD environment Deployment is Successful'  
+                }
+                success { 
+                    emailext to: "${mailToRecipients}",
+                    subject: "${NAME} deployment status",
+                    body: "PROD Deployment is Successful" 
+                }  
+                failure {  
+                    mail bcc: '', body: "<b>${NAME}</b><br>Project: ${env.JOB_NAME} <br>Build Number: ${env.BUILD_NUMBER} <br> URL de build: ${env.BUILD_URL}", cc: '', charset: 'UTF-8', from: '', mimeType: 'text/html', replyTo: '', subject: "ERROR CI: Project name -> ${env.JOB_NAME}", to: "${mailToRecipients}";  
+                }  
+            }
+
+        } //Deployment in Production Environment- ARO app prod cluster
+
+
+    } //End of Stages
+
+
+} //End of Pipeline
